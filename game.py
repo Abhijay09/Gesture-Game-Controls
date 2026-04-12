@@ -1,227 +1,321 @@
 import pygame
 import socket
 import sys
+import math
 import random
 
-# --- 1. NETWORK SETUP ---
-UDP_IP = "127.0.0.1"
+# ─── NETWORK ─────────────────────────────────────────────────────────────────
+UDP_IP   = "127.0.0.1"
 UDP_PORT = 5005
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 try:
     sock.bind((UDP_IP, UDP_PORT))
     sock.setblocking(0)
 except:
-    pass 
+    pass
 
-# --- 2. CONSTANTS ---
-SCREEN_W, SCREEN_H = 800, 600
-GRAVITY = 0.8
-WALK_SPEED = 8
-DASH_SPEED = 18 
-JUMP_FORCE = -20
+# ─── CONSTANTS ───────────────────────────────────────────────────────────────
+SW, SH      = 960, 540
+FPS         = 60
+GRAVITY     = 0.65
+WALK_SPEED  = 6
+JUMP_FORCE  = -14
+DASH_SPEED  = 18
+DASH_DUR    = 10
+DASH_CD     = 45
 
-# Colors
-BG_COLOR = (20, 20, 30)
-PLAT_COLOR = (50, 50, 70)
-GRASS_TOP = (0, 200, 100)
-SPIKE_COLOR = (255, 50, 50)
-CHECKPOINT_COL = (255, 255, 0)
+# ─── PALETTE ─────────────────────────────────────────────────────────────────
+BG         = (5, 7, 15)
+PLAT_COL   = (20, 25, 50)
+PLAT_EDGE  = (60, 100, 200)
+P_NORMAL   = (80, 180, 255)
+P_DASH     = (255, 150, 0)
+P_ATTACK   = (255, 255, 255)
+ENEMY_COL  = (0, 255, 120)
+BULLET_COL = (200, 255, 100)
+CHECK_COL  = (0, 220, 255)
 
-class Spike:
-    def __init__(self, x, y, width):
-        self.rect = pygame.Rect(x, y, width, 20)
+# ─── LEVEL DATA ──────────────────────────────────────────────────────────────
+PLATFORMS = [
+    pygame.Rect(0, 460, 500, 20),
+    pygame.Rect(600, 400, 250, 16),
+    pygame.Rect(950, 320, 250, 16),
+    pygame.Rect(1300, 420, 350, 16),
+    pygame.Rect(1750, 350, 300, 16),
+    pygame.Rect(2150, 280, 200, 16),
+    pygame.Rect(2150, 480, 200, 16),
+    pygame.Rect(2500, 400, 400, 16),
+    pygame.Rect(3000, 320, 300, 16),
+    pygame.Rect(3400, 450, 800, 16),
+    pygame.Rect(4300, 350, 300, 16),
+    pygame.Rect(4700, 280, 400, 16),
+    pygame.Rect(5200, 400, 300, 16),
+    pygame.Rect(5600, 320, 300, 16),
+    pygame.Rect(6100, 440, 1200, 20),
+]
 
-class BreakableBox:
+for i in range(0, 8000, 1500):
+    PLATFORMS.append(pygame.Rect(i, 520, 900, 20))
+
+CHECKPOINTS = [60, 1800, 3500, 5000, 6200]
+WIN_X = 7200
+
+# ─── UTILITIES ───────────────────────────────────────────────────────────────
+def make_vignette():
+    surf = pygame.Surface((SW, SH), pygame.SRCALPHA)
+    for i in range(0, SH, 12):
+        for j in range(0, SW, 12):
+            dist = math.hypot(j - SW/2, i - SH/2) / (SW/1.8)
+            alpha = int(min(255, dist**3 * 255))
+            pygame.draw.rect(surf, (0, 0, 0, alpha), (j, i, 12, 12))
+    return surf
+
+# ─── CLASSES ─────────────────────────────────────────────────────────────────
+class Bullet:
+    def __init__(self, x, y, angle):
+        self.x, self.y = float(x), float(y)
+        self.vx = math.cos(angle) * 4.5
+        self.vy = math.sin(angle) * 4.5
+        self.rect = pygame.Rect(x, y, 8, 8)
+        self.life = 200
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.rect.topleft = (self.x, self.y)
+        self.life -= 1
+
+class Enemy:
     def __init__(self, x, y):
-        self.rect = pygame.Rect(x, y, 70, 70)
-        self.alive = True
+        self.rect = pygame.Rect(x, y, 32, 32)
+        self.fire_cd = random.randint(30, 90)
 
-class Checkpoint:
-    def __init__(self, x, y):
-        self.rect = pygame.Rect(x, y, 60, 100)
-        self.activated = False
+    def update(self, px, py, bullets, sx):
+        if abs(self.rect.x - sx) > SW + 200: return
+        self.fire_cd -= 1
+        if self.fire_cd <= 0:
+            ang = math.atan2(py - self.rect.centery, px - self.rect.centerx)
+            bullets.append(Bullet(self.rect.centerx, self.rect.centery, ang))
+            self.fire_cd = 110
 
 class Player:
     def __init__(self):
-        self.rect = pygame.Rect(100, 300, 40, 60)
-        self.vel_x = 0
-        self.vel_y = 0
-        self.is_grounded = False
-        self.facing_right = True
-        self.respawn_point = (100, 300)
-        self.is_attacking = False
+        self.spawn = [60.0, 380.0]
+        self.reset_to_spawn()
+        self.rect = pygame.Rect(self.x, self.y, 22, 34)
+        self.facing = 1
+        self.df = 0
+        self.dcd = 0
+        self.coyote = 0
+        self.jbuf = 0
+        self.atk_frame = 0
 
-    def reset_to_checkpoint(self):
-        self.rect.topleft = self.respawn_point
-        self.vel_x = 0
-        self.vel_y = 0
+    def reset_to_spawn(self):
+        self.x, self.y = self.spawn[0], self.spawn[1]
+        self.vx = self.vy = 0.0
+        self.on_gnd = False
 
-    def update(self, move, action, platforms, boxes, spikes):
-        # 1. Gravity
-        self.vel_y += GRAVITY
+    def get_attack_rect(self):
+        """Returns the current hitbox for the sword swing."""
+        if self.atk_frame > 0:
+            # Hitbox appears in front of the player based on facing direction
+            if self.facing > 0:
+                return pygame.Rect(self.rect.right, self.rect.y - 10, 45, 54)
+            else:
+                return pygame.Rect(self.rect.left - 45, self.rect.y - 10, 45, 54)
+        return None
+
+    def update(self, move, action, bullets):
+        if action == "DASH" and self.dcd == 0 and self.df == 0:
+            self.df = DASH_DUR
+            self.dcd = DASH_CD
+            self.vy = 0
+        if action == "JUMP": self.jbuf = 8
+        if action == "ATTACK" and self.atk_frame == 0: 
+            self.atk_frame = 12 # Attack lasts 12 frames
         
-        # 2. Instant Input
-        speed = DASH_SPEED if action == "ATTACK" else WALK_SPEED
-        self.is_attacking = (action == "ATTACK")
-        
-        if move == "LEFT":
-            self.vel_x = -speed
-            self.facing_right = False
-        elif move == "RIGHT":
-            self.vel_x = speed
-            self.facing_right = True
+        if self.dcd > 0: self.dcd -= 1
+        if self.atk_frame > 0: self.atk_frame -= 1
+
+        if self.df > 0:
+            self.vx = self.facing * DASH_SPEED
+            self.df -= 1
         else:
-            self.vel_x = 0 # Zero Slipperiness
+            target_vx = 0
+            if move == "LEFT":  target_vx = -WALK_SPEED; self.facing = -1
+            if move == "RIGHT": target_vx = WALK_SPEED;  self.facing = 1
+            self.vx = target_vx
 
-        if action == "JUMP" and self.is_grounded:
-            self.vel_y = JUMP_FORCE
-            self.is_grounded = False
+        if self.df == 0:
+            self.vy = min(self.vy + GRAVITY, 18)
+        
+        if self.on_gnd: self.coyote = 6
+        if self.coyote > 0: self.coyote -= 1
+        if self.jbuf > 0: self.jbuf -= 1
 
-        # 3. Horizontal Movement & Wall Collisions
-        self.rect.x += self.vel_x
-        for p in platforms:
+        if self.jbuf > 0 and self.coyote > 0:
+            self.vy = JUMP_FORCE
+            self.coyote = 0
+            self.jbuf = 0
+
+        self.x += self.vx
+        self.rect.x = int(self.x)
+        for p in PLATFORMS:
             if self.rect.colliderect(p):
-                if self.vel_x > 0: self.rect.right = p.left
-                if self.vel_x < 0: self.rect.left = p.right
+                if self.vx > 0: self.rect.right = p.left
+                elif self.vx < 0: self.rect.left = p.right
+                self.x = float(self.rect.x)
 
-        # 4. Vertical Movement & Floor Collisions
-        self.is_grounded = False
-        self.rect.y += self.vel_y
-        for p in platforms:
+        self.on_gnd = False
+        self.y += self.vy
+        self.rect.y = int(self.y)
+        for p in PLATFORMS:
             if self.rect.colliderect(p):
-                if self.vel_y > 0: # Landing
+                if self.vy > 0:
                     self.rect.bottom = p.top
-                    self.vel_y = 0
-                    self.is_grounded = True
-                elif self.vel_y < 0: # Ceiling
+                    self.vy = 0
+                    self.on_gnd = True
+                elif self.vy < 0:
                     self.rect.top = p.bottom
-                    self.vel_y = 0
-        
-        for b in boxes:
-            if b.alive and self.rect.colliderect(b.rect):
-                if self.vel_y > 0:
-                    self.rect.bottom = b.rect.top
-                    self.vel_y = 0
-                    self.is_grounded = True
+                    self.vy = 0
+                self.y = float(self.rect.y)
 
-        # 5. Death Checks (Spikes or Falling)
-        for s in spikes:
-            if self.rect.colliderect(s.rect):
-                self.reset_to_checkpoint()
-        
-        if self.rect.y > SCREEN_H + 500: # Fell into pit
-            self.reset_to_checkpoint()
+        if self.y > SH + 300: self.die(bullets)
 
+    def die(self, bullets):
+        self.reset_to_spawn()
+        bullets.clear()
+
+# ─── MAIN ────────────────────────────────────────────────────────────────────
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+    screen = pygame.display.set_mode((SW, SH))
+    pygame.display.set_caption("Neon Runner")
     clock = pygame.time.Clock()
+    font = pygame.font.SysFont("consolas", 16)
+
+    vignette = make_vignette()
     player = Player()
     
-    # --- LEVEL GENERATION (Side-Scroller Style) ---
-    platforms = [pygame.Rect(0, 450, 800, 200)] # Starting Zone
-    checkpoints = [Checkpoint(100, 350)]
-    spikes = []
-    boxes = []
-
-    last_end_x = 800
-    last_y = 450
+    enemies = [
+        Enemy(1400, 380), Enemy(2200, 240), Enemy(2800, 360),
+        Enemy(3800, 410), Enemy(4800, 240), Enemy(5800, 280), Enemy(6500, 400)
+    ]
+    bullets = []
     
-    # Generate a linear horizontal level
-    for i in range(40):
-        # Gap between platforms
-        gap = random.randint(150, 300)
-        
-        # Next platform stats
-        p_width = random.randint(400, 700) # MUCH LARGER
-        # Vertical shift (limited to ensure you can always jump up)
-        last_y = max(150, min(last_y + random.randint(-150, 150), 500))
-        
-        # THE NO-HEAD-BONK RULE: 
-        # New X starts AFTER the old X ends.
-        new_x = last_end_x + gap
-        plat = pygame.Rect(new_x, last_y, p_width, 300)
-        platforms.append(plat)
-        
-        # Add Spikes in the gaps or on platforms
-        if random.random() > 0.6:
-            spikes.append(Spike(new_x + 100, last_y - 20, 100))
-        
-        # Add Boxes
-        if random.random() > 0.5:
-            boxes.append(BreakableBox(new_x + 300, last_y - 70))
-            
-        # Checkpoints every few platforms
-        if i % 5 == 0:
-            checkpoints.append(Checkpoint(new_x + 50, last_y - 100))
-            
-        last_end_x = new_x + p_width
-
-    # Final Win Goal
-    win_flag = pygame.Rect(last_end_x - 200, last_y - 200, 100, 200)
-
-    scroll_x = 0
-    current_move, current_action = "IDLE", "IDLE"
+    scroll_x = 0.0
+    won = False
+    move_input = "IDLE"
+    action_input = "IDLE"
 
     while True:
         try:
-            data, _ = sock.recvfrom(1024)
-            msg = data.decode().split("_")
-            current_move, current_action = msg[0], msg[1]
+            while True:
+                data, _ = sock.recvfrom(512)
+                raw = data.decode().split("_")
+                if len(raw) >= 2:
+                    move_input, action_input = raw[0], raw[1]
         except: pass
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_LEFT:  move_input = "LEFT"
+                if event.key == pygame.K_RIGHT: move_input = "RIGHT"
+                if event.key == pygame.K_UP:    action_input = "JUMP"
+                if event.key == pygame.K_x:     action_input = "DASH"
+                if event.key == pygame.K_z:     action_input = "ATTACK"
+                if event.key == pygame.K_r:
+                    player.spawn = [60.0, 380.0]
+                    player.die(bullets)
+                    enemies = [Enemy(1400, 380), Enemy(2200, 240), Enemy(2800, 360), 
+                               Enemy(3800, 410), Enemy(4800, 240), Enemy(5800, 280), Enemy(6500, 400)]
+                    won = False
+            if event.type == pygame.KEYUP:
+                if event.key in (pygame.K_LEFT, pygame.K_RIGHT): move_input = "IDLE"
+                if event.key in (pygame.K_UP, pygame.K_x, pygame.K_z): action_input = "IDLE"
 
-        player.update(current_move, current_action, platforms, boxes, spikes)
+        if not won:
+            player.update(move_input, action_input, bullets)
+            if action_input in ["JUMP", "DASH", "ATTACK"]: action_input = "IDLE"
 
-        # Attack
-        if player.is_attacking:
-            sword = player.rect.inflate(100, 100)
-            for b in boxes:
-                if sword.colliderect(b.rect): b.alive = False
+            for cx in CHECKPOINTS:
+                if abs(player.x - cx) < 30: player.spawn = [float(cx), player.y]
 
-        # Checkpoints
-        for cp in checkpoints:
-            if player.rect.colliderect(cp.rect):
-                player.respawn_point = (cp.rect.x + 20, cp.rect.y + 20)
-                cp.activated = True
+            # ─── ATTACK COLLISION LOGIC ───
+            atk_rect = player.get_attack_rect()
+            
+            for e in enemies[:]:
+                e.update(player.x, player.y, bullets, scroll_x)
+                if atk_rect and atk_rect.colliderect(e.rect):
+                    enemies.remove(e) # Kill enemy
+            
+            for b in bullets[:]:
+                b.update()
+                if atk_rect and atk_rect.colliderect(b.rect):
+                    bullets.remove(b) # Destroy/Deflect bullet
+                elif b.rect.colliderect(player.rect):
+                    player.die(bullets)
+                    break
+                elif b.life <= 0: bullets.remove(b)
 
-        # CAMERA: Smooth Horizontal Follow
-        scroll_x += (player.rect.x - scroll_x - 200) * 0.1
+            if player.x > WIN_X: won = True
 
-        if player.rect.colliderect(win_flag):
-            print("LEVEL COMPLETE!"); pygame.quit(); sys.exit()
-
-        # --- DRAWING ---
-        screen.fill(BG_COLOR)
+        scroll_x += (player.x - scroll_x - 300) * 0.1
+        screen.fill(BG)
         
-        # All game objects must be drawn with "- scroll_x"
-        for p in platforms:
-            pygame.draw.rect(screen, PLAT_COLOR, (p.x - scroll_x, p.y, p.w, p.h))
-            pygame.draw.rect(screen, GRASS_TOP, (p.x - scroll_x, p.y, p.w, 10))
-            
-        for s in spikes:
-            # Draw Spikes as simple red rectangles/triangles
-            pygame.draw.rect(screen, SPIKE_COLOR, (s.rect.x - scroll_x, s.rect.y, s.rect.w, s.rect.h))
-            
-        for cp in checkpoints:
-            c = (0, 255, 0) if cp.activated else CHECKPOINT_COL
-            pygame.draw.rect(screen, c, (cp.rect.x - scroll_x, cp.rect.y, 10, 100))
-            
-        for b in boxes:
-            if b.alive:
-                pygame.draw.rect(screen, (100, 50, 0), (b.rect.x - scroll_x, b.rect.y, b.rect.w, b.rect.h))
+        # Draw grid
+        for i in range(0, SW + 100, 100):
+            off = i - (scroll_x * 0.5) % 100
+            pygame.draw.line(screen, (15, 20, 40), (off, 0), (off, SH))
 
-        # Goal
-        pygame.draw.rect(screen, (255, 215, 0), (win_flag.x - scroll_x, win_flag.y, win_flag.w, win_flag.h), 5)
+        # Platforms
+        for p in PLATFORMS:
+            rx = p.x - int(scroll_x)
+            if -p.w < rx < SW:
+                pygame.draw.rect(screen, PLAT_COL, (rx, p.y, p.w, p.h))
+                pygame.draw.rect(screen, PLAT_EDGE, (rx, p.y, p.w, 2))
+
+        # Enemies
+        for e in enemies:
+            rx = e.rect.x - int(scroll_x)
+            pygame.draw.rect(screen, ENEMY_COL, (rx, e.rect.y, 32, 32), 2)
+            pygame.draw.rect(screen, ENEMY_COL, (rx+12, e.rect.y+12, 8, 8))
+
+        # Bullets
+        for b in bullets:
+            rx = b.rect.x - int(scroll_x)
+            pygame.draw.rect(screen, BULLET_COL, (rx, b.rect.y, 8, 8))
 
         # Player
-        p_col = (255, 100, 100) if not player.is_attacking else (255, 255, 255)
-        pygame.draw.rect(screen, p_col, (player.rect.x - scroll_x, player.rect.y, player.rect.w, player.rect.h))
+        prx = player.rect.x - int(scroll_x)
+        p_col = P_DASH if player.df > 0 else (P_ATTACK if player.atk_frame > 0 else P_NORMAL)
+        pygame.draw.rect(screen, p_col, (prx, player.rect.y, player.rect.w, player.rect.h))
+        
+        # ─── DRAW ATTACK SLASH ───
+        if player.atk_frame > 0:
+            atk_visual_rect = player.get_attack_rect()
+            atk_visual_rect.x -= int(scroll_x)
+            # Draw a bright arc/slash effect
+            pygame.draw.rect(screen, P_ATTACK, atk_visual_rect, 1)
+            # Inner "slash" line
+            line_x = atk_visual_rect.centerx
+            pygame.draw.line(screen, P_ATTACK, (line_x, atk_visual_rect.top), (line_x, atk_visual_rect.bottom), 2)
+
+        # Eye
+        eye_x = prx + (14 if player.facing > 0 else 4)
+        pygame.draw.rect(screen, BG, (eye_x, player.rect.y + 8, 4, 4))
+
+        screen.blit(vignette, (0, 0))
+        dist_txt = font.render(f"PROGRESS: {int(player.x)}/{WIN_X} | ENEMIES: {len(enemies)}", True, (70, 90, 140))
+        screen.blit(dist_txt, (20, 20))
+
+        if won:
+            msg = font.render("GAME FINISHED - PRESS R TO RESTART", True, P_ATTACK)
+            screen.blit(msg, (SW//2 - msg.get_width()//2, SH//2))
 
         pygame.display.flip()
-        clock.tick(60)
+        clock.tick(FPS)
 
 if __name__ == "__main__":
     main()
